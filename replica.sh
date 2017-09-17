@@ -62,4 +62,35 @@ if [ "$MYSQL_MASTER_SERVER" ]; then
     echo "CHANGE MASTER TO MASTER_HOST='$MYSQL_MASTER_SERVER', MASTER_PORT=$MYSQL_MASTER_PORT, MASTER_USER='$MYSQL_REPLICA_USER', MASTER_PASSWORD='$MYSQL_REPLICA_PASS', MASTER_LOG_FILE='$MasterFile', MASTER_LOG_POS=$MasterPosition;"  | "${mysql[@]}"
 
     echo "START SLAVE;"  | "${mysql[@]}"
+
+    # If the slave is not synced anymore, lock the master, dump current content, import in slave and finally reset the replication from the slave
+    if grep -q 'Slave failed' <<< $(mysql -u root -e 'SHOW SLAVE STATUS'); then
+        echo found
+
+        mysql -u root -h $MYSQL_MASTER_SERVER -e '\
+            RESET MASTER; \
+            FLUSH TABLES WITH READ LOCK;'
+
+        CURRENT_LOG=$(mysql -u root -h $MYSQL_MASTER_SERVER -ANe 'SHOW MASTER STATUS;' | awk '{print $1}')
+        CURRENT_POS=$(mysql -u root -h $MYSQL_MASTER_SERVER -ANe 'SHOW MASTER STATUS;' | awk '{print $2}')
+
+        # Dump last version of master
+        mysqldump -u root -h $MYSQL_MASTER_SERVER --all-databases > /var/lib/mysql/mysqldump.sql
+
+        # Unlock master after dump is done
+        mysql -u root -h $MYSQL_MASTER_SERVER -e 'UNLOCK TABLES;'
+
+        # Stop Slave
+        mysql -u root -e 'STOP SLAVE;'
+        # Import dump in slave
+        mysql -u root < /var/lib/mysql/mysqldump.sql
+
+        # Sync slave with master logs
+        mysql -u root -e "\
+            RESET SLAVE; \
+            CHANGE MASTER TO MASTER_LOG_FILE='${CURRENT_LOG}', MASTER_LOG_POS=${CURRENT_POS}; \
+            START SLAVE; \
+            SHOW SLAVE STATUS;"
+    fi
+
 fi
