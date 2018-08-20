@@ -63,38 +63,28 @@ if [ "$MYSQL_MASTER_SERVER" ]; then
 
     echo "START SLAVE;"  | "${mysql[@]}"
 
-    # If the slave is not synced anymore, lock the master, dump current content, import in slave and finally reset the replication from the slave
-    if grep -q 'Slave failed' <<< $(mysql -u root --password=$MYSQL_ROOT_PASSWORD -e 'SHOW SLAVE STATUS'); then
-        echo found
+    mysql -u root -h $MYSQL_MASTER_SERVER --password=$MYSQL_ROOT_PASSWORD -e '\
+        RESET MASTER; \
+        FLUSH TABLES WITH READ LOCK;'
 
-        mysql -u root -h $MYSQL_MASTER_SERVER --password=$MYSQL_ROOT_PASSWORD -e '\
-            RESET MASTER; \
-            FLUSH TABLES WITH READ LOCK;'
+    CURRENT_LOG=$(mysql -u root -h $MYSQL_MASTER_SERVER --password=$MYSQL_ROOT_PASSWORD -ANe 'SHOW MASTER STATUS;' | awk '{print $1}')
+    CURRENT_POS=$(mysql -u root -h $MYSQL_MASTER_SERVER --password=$MYSQL_ROOT_PASSWORD -ANe 'SHOW MASTER STATUS;' | awk '{print $2}')
 
-        CURRENT_LOG=$(mysql -u root -h $MYSQL_MASTER_SERVER --password=$MYSQL_ROOT_PASSWORD -ANe 'SHOW MASTER STATUS;' | awk '{print $1}')
-        CURRENT_POS=$(mysql -u root -h $MYSQL_MASTER_SERVER --password=$MYSQL_ROOT_PASSWORD -ANe 'SHOW MASTER STATUS;' | awk '{print $2}')
+    # Dump last version of master
+    mysqldump -u root -h $MYSQL_MASTER_SERVER --password=$MYSQL_ROOT_PASSWORD --all-databases > /var/lib/mysql/mysqldump.sql
 
-        # Dump last version of master
-        mysqldump -u root -h $MYSQL_MASTER_SERVER --password=$MYSQL_ROOT_PASSWORD --all-databases > /var/lib/mysql/mysqldump.sql
+    # Unlock master after dump is done
+    mysql -u root -h $MYSQL_MASTER_SERVER --password=$MYSQL_ROOT_PASSWORD -e 'UNLOCK TABLES;'
 
-        # Unlock master after dump is done
-        mysql -u root -h $MYSQL_MASTER_SERVER --password=$MYSQL_ROOT_PASSWORD -e 'UNLOCK TABLES;'
+    # Stop Slave
+    mysql -u root --password=$MYSQL_ROOT_PASSWORD -e 'STOP SLAVE;'
+    # Import dump in slave
+    mysql -u root --password=$MYSQL_ROOT_PASSWORD < /var/lib/mysql/mysqldump.sql
 
-        # Stop Slave
-        mysql -u root --password=$MYSQL_ROOT_PASSWORD -e 'STOP SLAVE;'
-        # Import dump in slave
-        mysql -u root --password=$MYSQL_ROOT_PASSWORD < /var/lib/mysql/mysqldump.sql
-
-        # Sync slave with master logs
-        mysql -u root --password=$MYSQL_ROOT_PASSWORD -e "\
-            RESET SLAVE; \
-            CHANGE MASTER TO MASTER_LOG_FILE='${CURRENT_LOG}', MASTER_LOG_POS=${CURRENT_POS}; \
-            START SLAVE; \
-            SHOW SLAVE STATUS;"
-
-        echo Slave and master are synced again !
-    else
-        echo not found
-    fi
-
+    # Sync slave with master logs
+    mysql -u root --password=$MYSQL_ROOT_PASSWORD -e "\
+        RESET SLAVE; \
+        CHANGE MASTER TO MASTER_LOG_FILE='${CURRENT_LOG}', MASTER_LOG_POS=${CURRENT_POS}; \
+        START SLAVE; \
+        SHOW SLAVE STATUS;"
 fi
